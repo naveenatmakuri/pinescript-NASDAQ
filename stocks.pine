@@ -2,7 +2,7 @@
 strategy("Universal NASDAQ Long Strategy - Balanced", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
 
 // === INPUTS ===
-chartTF = input.string("15", title="Chart Timeframe (min)") // For alert labeling
+chartTF = input.string("15", title="Chart Timeframe (min)")
 mode = input.string("Balanced", title="Strategy Mode", options=["Balanced"])
 rsiPeriod = input.int(14, title="RSI Period")
 emaFastLen = input.int(9, title="EMA Fast Length")
@@ -22,23 +22,38 @@ atr = ta.atr(atrPeriod)
 macdLine = ta.ema(close, 12) - ta.ema(close, 26)
 macdSignal = ta.ema(macdLine, 9)
 macdHist = macdLine - macdSignal
+volSMA = ta.sma(volume, 20)
+volVsAvg = volume / volSMA
+prevClose = close[1]
+
+// === HTF & INDEX TRENDS ===
+emaHTF = request.security(syminfo.tickerid, "60", ta.ema(close, 50))
+ixicTrend = request.security("NASDAQ:IXIC", "15", ta.ema(close, 50))
+smhTrend = request.security("NASDAQ:SMH", "15", ta.ema(close, 50))
+indexBias = close > ixicTrend ? "bullish" : "bearish"
+sectorBias = close > smhTrend ? "bullish" : "bearish"
+htfTrendBias = close > emaHTF ? "up" : "down"
+
+// === DIVERGENCE FLAGS ===
+rsiBullDiv = (close < close[1] and rsi > rsi[1])
+macdBullDiv = (macdHist > macdHist[1] and close < close[1])
 
 // === ENTRY CONDITIONS ===
-longCondition = rsi > 50 and macdHist > 0 and adx > 20 and close > emaFast
-
-if (longCondition)
-    strategy.entry("Long", strategy.long)
+longCondition = rsi > 50 and macdHist > 0 and adx > 20 and volVsAvg > 1.2 and close > emaFast
+longTrigger = longCondition and not longCondition[1]
 
 // === EXIT CONDITIONS ===
+exitCondition = macdHist < 0 or rsi < 48 or adx < 15 or volVsAvg < 1.0
+exitTrigger = exitCondition and not exitCondition[1]
+
+// === RISK METRICS ===
 sl = close - atr * slMult
 tp = close + atr * tpMult
-strategy.exit("TP/SL Exit", from_entry="Long", stop=sl, limit=tp)
+riskPerShare = close - sl
+rewardPerShare = tp - close
+rrRatio = rewardPerShare / riskPerShare
 
-exitCondition = macdHist < 0 or rsi < 48
-if (exitCondition)
-    strategy.close("Long")
-
-// === CONTEXT ALERT (every 15 min real time, not bars) ===
+// === ALERT MESSAGES ===
 contextAlertMessage = "{" +
   "\"action\":\"CONTEXT\"," +
   "\"symbol\":\"" + syminfo.ticker + "\"," +
@@ -54,8 +69,17 @@ contextAlertMessage = "{" +
   "\"ema_fast\":" + str.tostring(emaFast) + "," +
   "\"ema_slow\":" + str.tostring(emaSlow) + "," +
   "\"ema_master\":0," +
+  "\"ema_htf_1h\":" + str.tostring(emaHTF) + "," +
+  "\"htf_trend_1h\":\"" + htfTrendBias + "\"," +
+  "\"index_trend\":\"" + indexBias + "\"," +
+  "\"sector_trend\":\"" + sectorBias + "\"," +
   "\"adx\":" + str.tostring(adx) + "," +
   "\"atr\":" + str.tostring(atr) + "," +
+  "\"vol_sma\":" + str.tostring(volSMA) + "," +
+  "\"vol_vs_avg\":" + str.tostring(volVsAvg) + "," +
+  "\"prev_close\":" + str.tostring(prevClose) + "," +
+  "\"rsi_divergence\":\"" + (rsiBullDiv ? "bullish" : "none") + "\"," +
+  "\"macd_divergence\":\"" + (macdBullDiv ? "bullish" : "none") + "\"," +
   "\"score\":0," +
   "\"strength\":\"Unknown\"," +
   "\"open_position_size\":0," +
@@ -66,19 +90,8 @@ contextAlertMessage = "{" +
   "\"candle_low\":" + str.tostring(low) + "," +
   "\"candle_close\":" + str.tostring(close) + "," +
   "\"volume\":" + str.tostring(volume) + "," +
-  "\"vol_sma\":0," +
   "\"timestamp\":" + str.tostring(timenow * 1000) + "}"
 
-snapshotIntervalMin = input.int(15, title="Snapshot Interval (min)")
-snapIntervalMs = snapshotIntervalMin * 60 * 1000
-var int lastSnapshot = na
-isSnapshotDue = na(lastSnapshot) or (timenow * 1000 - lastSnapshot >= snapIntervalMs)
-
-if isSnapshotDue
-    alert(contextAlertMessage, alert.freq_once_per_bar)
-    lastSnapshot := timenow * 1000
-
-// === ENTRY ALERT ===
 alertMessage = "{" +
   "\"action\":\"ENTRY_TRIGGER\"," +
   "\"symbol\":\"" + syminfo.ticker + "\"," +
@@ -98,6 +111,14 @@ alertMessage = "{" +
   "\"atr\":" + str.tostring(atr) + "," +
   "\"stop_loss\":" + str.tostring(sl) + "," +
   "\"take_profit\":" + str.tostring(tp) + "," +
+  "\"risk_per_share\":" + str.tostring(riskPerShare) + "," +
+  "\"reward_per_share\":" + str.tostring(rewardPerShare) + "," +
+  "\"rr_ratio\":" + str.tostring(rrRatio) + "," +
+  "\"vol_sma\":" + str.tostring(volSMA) + "," +
+  "\"vol_vs_avg\":" + str.tostring(volVsAvg) + "," +
+  "\"prev_close\":" + str.tostring(prevClose) + "," +
+  "\"rsi_divergence\":\"" + (rsiBullDiv ? "bullish" : "none") + "\"," +
+  "\"macd_divergence\":\"" + (macdBullDiv ? "bullish" : "none") + "\"," +
   "\"score\":0," +
   "\"strength\":\"Unknown\"," +
   "\"open_position_size\":0," +
@@ -108,14 +129,8 @@ alertMessage = "{" +
   "\"candle_low\":" + str.tostring(low) + "," +
   "\"candle_close\":" + str.tostring(close) + "," +
   "\"volume\":" + str.tostring(volume) + "," +
-  "\"vol_sma\":0," +
   "\"timestamp\":" + str.tostring(timenow * 1000) + "}"
 
-alertcondition(longCondition, title="Long Entry Alert")
-if (longCondition)
-    alert(alertMessage, alert.freq_once_per_bar_close)
-
-// === EXIT ALERT ===
 exitAlertMessage = "{" +
   "\"action\":\"EXIT_SIGNAL\"," +
   "\"symbol\":\"" + syminfo.ticker + "\"," +
@@ -126,10 +141,33 @@ exitAlertMessage = "{" +
   "\"macd_line\":" + str.tostring(macdLine) + "," +
   "\"macd_signal\":" + str.tostring(macdSignal) + "," +
   "\"macd_hist\":" + str.tostring(macdHist) + "," +
+  "\"ema_fast\":" + str.tostring(emaFast) + "," +
+  "\"ema_slow\":" + str.tostring(emaSlow) + "," +
   "\"adx\":" + str.tostring(adx) + "," +
   "\"atr\":" + str.tostring(atr) + "," +
+  "\"vol_sma\":" + str.tostring(volSMA) + "," +
+  "\"vol_vs_avg\":" + str.tostring(volVsAvg) + "," +
+  "\"prev_close\":" + str.tostring(prevClose) + "," +
+  "\"rsi_divergence\":\"" + (rsiBullDiv ? "bullish" : "none") + "\"," +
+  "\"macd_divergence\":\"" + (macdBullDiv ? "bullish" : "none") + "\"," +
+  "\"candle_open\":" + str.tostring(open) + "," +
+  "\"candle_high\":" + str.tostring(high) + "," +
+  "\"candle_low\":" + str.tostring(low) + "," +
+  "\"candle_close\":" + str.tostring(close) + "," +
+  "\"volume\":" + str.tostring(volume) + "," +
   "\"timestamp\":" + str.tostring(timenow * 1000) + "}"
 
-alertcondition(exitCondition, title="Exit Alert - Indicator")
-if (exitCondition)
+// === STRATEGY EXECUTION ===
+if (longTrigger)
+    strategy.entry("Long", strategy.long)
+    alert(alertMessage, alert.freq_once_per_bar_close)
+
+if (exitTrigger)
+    strategy.close("Long")
     alert(exitAlertMessage, alert.freq_once_per_bar_close)
+
+// === ALERT CONDITIONS ===
+alertcondition(longTrigger, title="Entry Alert - All Conditions")
+alertcondition(exitTrigger, title="Exit Alert - Indicator")
+alertcondition(true, title="Context Alert - Every Bar")
+alert(contextAlertMessage, alert.freq_once_per_bar_close)
