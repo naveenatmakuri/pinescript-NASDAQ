@@ -2,172 +2,122 @@
 strategy("Universal NASDAQ Long Strategy - Balanced", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
 
 // === INPUTS ===
-chartTF = input.string("15", title="Chart Timeframe (min)")
-mode = input.string("Balanced", title="Strategy Mode", options=["Balanced"])
-rsiPeriod = input.int(14, title="RSI Period")
-emaFastLen = input.int(9, title="EMA Fast Length")
-emaSlowLen = input.int(21, title="EMA Slow Length")
-adxPeriod = input.int(14, title="ADX Period")
+chartTF      = input.string("15", title="Chart Timeframe (min)")
+mode         = input.string("Balanced", title="Strategy Mode", options=["Balanced"])
+rsiPeriod    = input.int(14, title="RSI Period")
+emaFastLen   = input.int(9, title="EMA Fast Length")
+emaSlowLen   = input.int(21, title="EMA Slow Length")
+adxPeriod    = input.int(14, title="ADX Period")
 adxSmoothing = input.int(14, title="ADX Smoothing")
-atrPeriod = input.int(14, title="ATR Period")
-slMult = input.float(1.2, title="Stop Loss ATR Multiplier")
-tpMult = input.float(2.0, title="Take Profit ATR Multiplier")
+atrPeriod    = input.int(14, title="ATR Period")
+slMult       = input.float(1.2, title="Stop Loss ATR Multiplier")
+tpMult       = input.float(2.0, title="Take Profit ATR Multiplier")
 
 // === INDICATORS ===
-rsi = ta.rsi(close, rsiPeriod)
-emaFast = ta.ema(close, emaFastLen)
-emaSlow = ta.ema(close, emaSlowLen)
+rsi        = ta.rsi(close, rsiPeriod)
+emaFast    = ta.ema(close, emaFastLen)
+emaSlow    = ta.ema(close, emaSlowLen)
 [_, _, adx] = ta.dmi(adxPeriod, adxSmoothing)
-atr = ta.atr(atrPeriod)
-macdLine = ta.ema(close, 12) - ta.ema(close, 26)
+atr        = ta.atr(atrPeriod)
+macdLine   = ta.ema(close, 12) - ta.ema(close, 26)
 macdSignal = ta.ema(macdLine, 9)
-macdHist = macdLine - macdSignal
-volSMA = ta.sma(volume, 20)
-volVsAvg = volume / volSMA
-prevClose = close[1]
+macdHist   = macdLine - macdSignal
+volSMA     = ta.sma(volume, 20)
+volVsAvg   = volume / volSMA
+prevClose  = close[1]
+ema200     = ta.ema(close, 200)
+
+// === TIME FILTER: Ignore first 15 mins after market open (09:30–09:45 EST) ===
+marketOpenTime = timestamp("America/New_York", year, month, dayofmonth, 9, 30)
+barTime = time
+isAfterOpen = barTime >= (marketOpenTime + 15 * 60 * 1000)
+
+
+// === UPGRADE VARIABLES ===
+var int   lastExitBar     = na
+var float lastEntryPrice  = na
+cooldownBars             = 3
+cooldownPassed           = na(lastExitBar) or (bar_index - lastExitBar > cooldownBars)
+
+priceGapPassed           = na(lastEntryPrice) or (math.abs(close - lastEntryPrice) > atr * 0.5)
+
+volSpike                 = volume > 1.5 * volSMA
+trendFilter              = close > ema200
+
+// === TRADE LIMIT RESET ON NEW DAY ===
+var int   tradeCounter   = 0
+var int   lastDay        = na
+currentDay                = dayofmonth(time)
+
+if (na(lastDay) or currentDay != lastDay)
+    tradeCounter := 0
+    lastDay      := currentDay
+
+canTradeToday             = tradeCounter < 3
 
 // === HTF & INDEX TRENDS ===
-emaHTF = request.security(syminfo.tickerid, "60", ta.ema(close, 50))
+emaHTF    = request.security(syminfo.tickerid, "60", ta.ema(close, 50))
 ixicTrend = request.security("NASDAQ:IXIC", "15", ta.ema(close, 50))
-smhTrend = request.security("NASDAQ:SMH", "15", ta.ema(close, 50))
+smhTrend  = request.security("NASDAQ:SMH", "15", ta.ema(close, 50))
 indexBias = close > ixicTrend ? "bullish" : "bearish"
-sectorBias = close > smhTrend ? "bullish" : "bearish"
-htfTrendBias = close > emaHTF ? "up" : "down"
+sectorBias= close > smhTrend  ? "bullish" : "bearish"
+htfTrendBias = close > emaHTF  ? "up"      : "down"
 
 // === DIVERGENCE FLAGS ===
-rsiBullDiv = (close < close[1] and rsi > rsi[1])
+rsiBullDiv  = (close < close[1] and rsi > rsi[1])
 macdBullDiv = (macdHist > macdHist[1] and close < close[1])
 
+// === RISK METRICS ===
+sl            = math.round((close - atr * slMult) * 100) / 100
+tp            = math.round((close + atr * tpMult) * 100) / 100
+riskPerShare  = math.round((close - sl) * 100) / 100
+rewardPerShare= math.round((tp - close) * 100) / 100
+rrRatio       = rewardPerShare / riskPerShare
+
+// === SL/TP BASED ON ACTUAL ENTRY ===
+slDynamic     = strategy.opentrades > 0 ? math.round((strategy.opentrades.entry_price(0) - atr * slMult) * 100) / 100 : na
+tpDynamic     = strategy.opentrades > 0 ? math.round((strategy.opentrades.entry_price(0) + atr * tpMult) * 100) / 100 : na
+
 // === ENTRY CONDITIONS ===
-longCondition = rsi > 50 and macdHist > 0 and adx > 20 and volVsAvg > 1.2 and close > emaFast
-longTrigger = longCondition and not longCondition[1]
+longCondition = rsi > 50 and macdHist > 0 and adx > 20 and volSpike and close > emaFast and trendFilter and rrRatio > 1.3 and cooldownPassed and priceGapPassed and canTradeToday and isAfterOpen
+longTrigger   = longCondition and not longCondition[1]
 
 // === EXIT CONDITIONS ===
 exitCondition = macdHist < 0 or rsi < 48 or adx < 15 or volVsAvg < 1.0
-exitTrigger = exitCondition and not exitCondition[1]
-
-// === RISK METRICS ===
-sl = close - atr * slMult
-tp = close + atr * tpMult
-riskPerShare = close - sl
-rewardPerShare = tp - close
-rrRatio = rewardPerShare / riskPerShare
-
-// === ALERT MESSAGES ===
-contextAlertMessage = "{" +
-  "\"action\":\"CONTEXT\"," +
-  "\"symbol\":\"" + syminfo.ticker + "\"," +
-  "\"timeframe\":\"" + chartTF + "\"," +
-  "\"direction\":\"flat\"," +
-  "\"mode\":\"" + mode + "\"," +
-  "\"reason\":\"Periodic Snapshot\"," +
-  "\"price\":" + str.tostring(close) + "," +
-  "\"rsi\":" + str.tostring(rsi) + "," +
-  "\"macd_line\":" + str.tostring(macdLine) + "," +
-  "\"macd_signal\":" + str.tostring(macdSignal) + "," +
-  "\"macd_hist\":" + str.tostring(macdHist) + "," +
-  "\"ema_fast\":" + str.tostring(emaFast) + "," +
-  "\"ema_slow\":" + str.tostring(emaSlow) + "," +
-  "\"ema_master\":0," +
-  "\"ema_htf_1h\":" + str.tostring(emaHTF) + "," +
-  "\"htf_trend_1h\":\"" + htfTrendBias + "\"," +
-  "\"index_trend\":\"" + indexBias + "\"," +
-  "\"sector_trend\":\"" + sectorBias + "\"," +
-  "\"adx\":" + str.tostring(adx) + "," +
-  "\"atr\":" + str.tostring(atr) + "," +
-  "\"vol_sma\":" + str.tostring(volSMA) + "," +
-  "\"vol_vs_avg\":" + str.tostring(volVsAvg) + "," +
-  "\"prev_close\":" + str.tostring(prevClose) + "," +
-  "\"rsi_divergence\":\"" + (rsiBullDiv ? "bullish" : "none") + "\"," +
-  "\"macd_divergence\":\"" + (macdBullDiv ? "bullish" : "none") + "\"," +
-  "\"score\":0," +
-  "\"strength\":\"Unknown\"," +
-  "\"open_position_size\":0," +
-  "\"entry_price\":0," +
-  "\"unrealized_pl_pct\":0," +
-  "\"candle_open\":" + str.tostring(open) + "," +
-  "\"candle_high\":" + str.tostring(high) + "," +
-  "\"candle_low\":" + str.tostring(low) + "," +
-  "\"candle_close\":" + str.tostring(close) + "," +
-  "\"volume\":" + str.tostring(volume) + "," +
-  "\"timestamp\":" + str.tostring(timenow * 1000) + "}"
-
-alertMessage = "{" +
-  "\"action\":\"ENTRY_TRIGGER\"," +
-  "\"symbol\":\"" + syminfo.ticker + "\"," +
-  "\"timeframe\":\"" + chartTF + "\"," +
-  "\"direction\":\"up\"," +
-  "\"mode\":\"" + mode + "\"," +
-  "\"reason\":\"All conditions met\"," +
-  "\"price\":" + str.tostring(close) + "," +
-  "\"rsi\":" + str.tostring(rsi) + "," +
-  "\"macd_line\":" + str.tostring(macdLine) + "," +
-  "\"macd_signal\":" + str.tostring(macdSignal) + "," +
-  "\"macd_hist\":" + str.tostring(macdHist) + "," +
-  "\"ema_fast\":" + str.tostring(emaFast) + "," +
-  "\"ema_slow\":" + str.tostring(emaSlow) + "," +
-  "\"ema_master\":0," +
-  "\"adx\":" + str.tostring(adx) + "," +
-  "\"atr\":" + str.tostring(atr) + "," +
-  "\"stop_loss\":" + str.tostring(sl) + "," +
-  "\"take_profit\":" + str.tostring(tp) + "," +
-  "\"risk_per_share\":" + str.tostring(riskPerShare) + "," +
-  "\"reward_per_share\":" + str.tostring(rewardPerShare) + "," +
-  "\"rr_ratio\":" + str.tostring(rrRatio) + "," +
-  "\"vol_sma\":" + str.tostring(volSMA) + "," +
-  "\"vol_vs_avg\":" + str.tostring(volVsAvg) + "," +
-  "\"prev_close\":" + str.tostring(prevClose) + "," +
-  "\"rsi_divergence\":\"" + (rsiBullDiv ? "bullish" : "none") + "\"," +
-  "\"macd_divergence\":\"" + (macdBullDiv ? "bullish" : "none") + "\"," +
-  "\"score\":0," +
-  "\"strength\":\"Unknown\"," +
-  "\"open_position_size\":0," +
-  "\"entry_price\":0," +
-  "\"unrealized_pl_pct\":0," +
-  "\"candle_open\":" + str.tostring(open) + "," +
-  "\"candle_high\":" + str.tostring(high) + "," +
-  "\"candle_low\":" + str.tostring(low) + "," +
-  "\"candle_close\":" + str.tostring(close) + "," +
-  "\"volume\":" + str.tostring(volume) + "," +
-  "\"timestamp\":" + str.tostring(timenow * 1000) + "}"
-
-exitAlertMessage = "{" +
-  "\"action\":\"EXIT_SIGNAL\"," +
-  "\"symbol\":\"" + syminfo.ticker + "\"," +
-  "\"timeframe\":\"" + chartTF + "\"," +
-  "\"reason\":\"Indicator exit triggered (RSI or MACD)\"," +
-  "\"price\":" + str.tostring(close) + "," +
-  "\"rsi\":" + str.tostring(rsi) + "," +
-  "\"macd_line\":" + str.tostring(macdLine) + "," +
-  "\"macd_signal\":" + str.tostring(macdSignal) + "," +
-  "\"macd_hist\":" + str.tostring(macdHist) + "," +
-  "\"ema_fast\":" + str.tostring(emaFast) + "," +
-  "\"ema_slow\":" + str.tostring(emaSlow) + "," +
-  "\"adx\":" + str.tostring(adx) + "," +
-  "\"atr\":" + str.tostring(atr) + "," +
-  "\"vol_sma\":" + str.tostring(volSMA) + "," +
-  "\"vol_vs_avg\":" + str.tostring(volVsAvg) + "," +
-  "\"prev_close\":" + str.tostring(prevClose) + "," +
-  "\"rsi_divergence\":\"" + (rsiBullDiv ? "bullish" : "none") + "\"," +
-  "\"macd_divergence\":\"" + (macdBullDiv ? "bullish" : "none") + "\"," +
-  "\"candle_open\":" + str.tostring(open) + "," +
-  "\"candle_high\":" + str.tostring(high) + "," +
-  "\"candle_low\":" + str.tostring(low) + "," +
-  "\"candle_close\":" + str.tostring(close) + "," +
-  "\"volume\":" + str.tostring(volume) + "," +
-  "\"timestamp\":" + str.tostring(timenow * 1000) + "}"
+exitTrigger   = exitCondition and not exitCondition[1]
 
 // === STRATEGY EXECUTION ===
 if (longTrigger)
     strategy.entry("Long", strategy.long)
-    alert(alertMessage, alert.freq_once_per_bar_close)
+    lastEntryPrice := close
+    tradeCounter   += 1
+    alert("{\"action\":\"ENTRY_TRIGGER\",\"symbol\":\"" + syminfo.ticker + "\",\"timeframe\":\"" + chartTF + "\",\"direction\":\"up\",\"mode\":\"" + mode + "\",\"reason\":\"All conditions met\",\"price\":" + str.tostring(math.round(close * 100) / 100) + ",\"stop_loss\":" + str.tostring(sl) + ",\"take_profit\":" + str.tostring(tp) + ",\"risk_per_share\":" + str.tostring(riskPerShare) + ",\"reward_per_share\":" + str.tostring(rewardPerShare) + ",\"rr_ratio\":" + str.tostring(rrRatio) + "}", alert.freq_once_per_bar_close)
+
+strategy.exit("TP/SL Exit", from_entry="Long", stop=slDynamic, limit=tpDynamic)
 
 if (exitTrigger)
-    strategy.close("Long")
-    alert(exitAlertMessage, alert.freq_once_per_bar_close)
+    strategy.close("Long", comment="Indicator Exit")
+    lastExitBar := bar_index
+    alert("{\"action\":\"EXIT_SIGNAL\",\"symbol\":\"" + syminfo.ticker + "\",\"timeframe\":\"" + chartTF + "\",\"reason\":\"Indicator exit triggered\",\"price\":" + str.tostring(math.round(close * 100) / 100) + "}", alert.freq_once_per_bar_close)
+
+if bar_index % 4 == 0
+    alert("{\"action\":\"CONTEXT\",\"symbol\":\"" + syminfo.ticker + "\",\"timeframe\":\"" + chartTF + "\",\"direction\":\"flat\",\"mode\":\"" + mode + "\",\"price\":" + str.tostring(math.round(close * 100) / 100) + "}", alert.freq_once_per_bar_close)
 
 // === ALERT CONDITIONS ===
 alertcondition(longTrigger, title="Entry Alert - All Conditions")
 alertcondition(exitTrigger, title="Exit Alert - Indicator")
 alertcondition(true, title="Context Alert - Every Bar")
-alert(contextAlertMessage, alert.freq_once_per_bar_close)
+
+// === PLOTS ===
+plot(emaFast, color=color.orange, title="EMA Fast")
+plot(emaSlow, color=color.blue, title="EMA Slow")
+plot(macdHist, title="MACD Histogram", color=macdHist >= 0 ? color.green : color.red, style=plot.style_columns)
+plot(rsi, title="RSI", color=color.purple)
+plot(adx, title="ADX", color=color.teal)
+plot(atr, title="ATR", color=color.gray)
+
+// === SIGNAL MARKERS ===
+plotshape(longTrigger, title="Long Entry", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
+plotshape(exitTrigger, title="Exit Signal", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+plot(strategy.opentrades > 0 ? slDynamic : na, title="Stop Loss", color=color.red, style=plot.style_linebr)
+plot(strategy.opentrades > 0 ? tpDynamic : na, title="Take Profit", color=color.green, style=plot.style_linebr)
