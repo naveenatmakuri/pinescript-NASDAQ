@@ -66,6 +66,8 @@ htfTrendBias = close > emaHTF  ? "up"      : "down"
 // === DIVERGENCE FLAGS ===
 rsiBullDiv  = (close < close[1] and rsi > rsi[1])
 macdBullDiv = (macdHist > macdHist[1] and close < close[1])
+rsiDiv  = rsiBullDiv ? "bullish" : "none"
+macdDiv = macdBullDiv ? "bullish" : "none"
 
 // === RISK METRICS ===
 sl            = math.round((close - atr * slMult) * 100) / 100
@@ -79,8 +81,9 @@ slDynamic     = strategy.opentrades > 0 ? math.round((strategy.opentrades.entry_
 tpDynamic     = strategy.opentrades > 0 ? math.round((strategy.opentrades.entry_price(0) + atr * tpMult) * 100) / 100 : na
 
 // === ENTRY CONDITIONS ===
-longCondition = rsi > 50 and macdHist > 0 and adx > 20 and volSpike and close > emaFast and trendFilter and rrRatio > 1.3 and cooldownPassed and priceGapPassed and canTradeToday and isAfterOpen
+longCondition = rsi > 50 and macdHist > 0 and adx > 20 and volSpike and close > emaFast and emaFast > emaSlow and isAfterOpen
 longTrigger   = longCondition and not longCondition[1]
+
 
 // === EXIT CONDITIONS ===
 exitCondition = macdHist < 0 or rsi < 48 or adx < 15 or volVsAvg < 1.0
@@ -91,17 +94,48 @@ if (longTrigger)
     strategy.entry("Long", strategy.long)
     lastEntryPrice := close
     tradeCounter   += 1
-    alert("{\"action\":\"ENTRY_TRIGGER\",\"symbol\":\"" + syminfo.ticker + "\",\"timeframe\":\"" + chartTF + "\",\"direction\":\"up\",\"mode\":\"" + mode + "\",\"reason\":\"All conditions met\",\"price\":" + str.tostring(math.round(close * 100) / 100) + ",\"stop_loss\":" + str.tostring(sl) + ",\"take_profit\":" + str.tostring(tp) + ",\"risk_per_share\":" + str.tostring(riskPerShare) + ",\"reward_per_share\":" + str.tostring(rewardPerShare) + ",\"rr_ratio\":" + str.tostring(rrRatio) + "}", alert.freq_once_per_bar_close)
+    alert("{\"action\":\"ENTRY_TRIGGER\",\"symbol\":\""+syminfo.ticker+"\",\"timeframe\":\""+chartTF+"\",\"direction\":\"up\",\"mode\":\""+mode+"\",\"reason\":\"All conditions met\",\"price\":"+str.tostring(math.round(close*100)/100)+",\"stop_loss\":"+str.tostring(sl)+",\"take_profit\":"+str.tostring(tp)+",\"risk_per_share\":"+str.tostring(riskPerShare)+",\"reward_per_share\":"+str.tostring(rewardPerShare)+",\"rr_ratio\":"+str.tostring(rrRatio)+",\"RSI\":"+str.tostring(rsi)+",\"MACD_Line\":"+str.tostring(macdLine)+",\"MACD_Signal\":"+str.tostring(macdSignal)+",\"MACD_Hist\":"+str.tostring(macdHist)+",\"EMA_Fast\":"+str.tostring(emaFast)+",\"EMA_Slow\":"+str.tostring(emaSlow)+",\"ADX\":"+str.tostring(adx)+",\"ATR\":"+str.tostring(atr)+",\"Volume\":"+str.tostring(volume)+",\"Vol_SMA\":"+str.tostring(volSMA)+",\"Vol_vs_Avg\":"+str.tostring(volume/volSMA)+",\"Candle\":{\"Open\":"+str.tostring(open)+",\"High\":"+str.tostring(high)+",\"Low\":"+str.tostring(low)+",\"Close\":"+str.tostring(close)+",\"Prev_Close\":"+str.tostring(close[1])+"},\"Divergence\":{\"RSI\":\""+rsiDiv+"\",\"MACD\":\""+macdDiv+"\"}}", alert.freq_once_per_bar_close)
 
-strategy.exit("TP/SL Exit", from_entry="Long", stop=slDynamic, limit=tpDynamic)
 
-if (exitTrigger)
+// === TRAILING STOP EXIT (Corrected) ===
+trailOffset = atr * 0.8
+strategy.exit("TP/SL + Trail Exit", from_entry="Long", stop=slDynamic, limit=tpDynamic, trail_offset=trailOffset, trail_price=na)
+
+
+
+// === TIME EXIT SETUP ===
+eodCloseTime = timestamp("America/New_York", year, month, dayofmonth, 15, 55)
+isEOD = (time >= eodCloseTime and time < eodCloseTime + 60 * 1000)
+
+alreadyExited = false
+
+if (strategy.opentrades == 0)
+    alreadyExited := false
+    
+// === PROFIT LOCK EXIT ===
+profitNearTP = strategy.opentrades > 0 and close > (tpDynamic - (atr * 0.4)) and macdHist < 0
+if profitNearTP and not alreadyExited
+    strategy.close("Long", comment="Profit Lock Exit")
+    alert("{\"action\":\"EXIT_SIGNAL\",\"symbol\":\""+syminfo.ticker+"\",\"reason\":\"Profit Lock Exit near TP\"}", alert.freq_once_per_bar_close)
+    alreadyExited := true
+
+// === EOD EXIT ===
+if isEOD and strategy.opentrades > 0 and not alreadyExited
+    strategy.close("Long", comment="EOD Exit")
+    alert("{\"action\":\"EXIT_SIGNAL\",\"symbol\":\""+syminfo.ticker+"\",\"reason\":\"EOD Exit\"}", alert.freq_once_per_bar_close)
+    alreadyExited := true
+
+// === INDICATOR EXIT ===
+if exitTrigger and not alreadyExited
     strategy.close("Long", comment="Indicator Exit")
     lastExitBar := bar_index
-    alert("{\"action\":\"EXIT_SIGNAL\",\"symbol\":\"" + syminfo.ticker + "\",\"timeframe\":\"" + chartTF + "\",\"reason\":\"Indicator exit triggered\",\"price\":" + str.tostring(math.round(close * 100) / 100) + "}", alert.freq_once_per_bar_close)
+    alert("{\"action\":\"EXIT_SIGNAL\",\"symbol\":\""+syminfo.ticker+"\",\"reason\":\"Indicator exit triggered\"}", alert.freq_once_per_bar_close)
+
+
 
 if bar_index % 4 == 0
-    alert("{\"action\":\"CONTEXT\",\"symbol\":\"" + syminfo.ticker + "\",\"timeframe\":\"" + chartTF + "\",\"direction\":\"flat\",\"mode\":\"" + mode + "\",\"price\":" + str.tostring(math.round(close * 100) / 100) + "}", alert.freq_once_per_bar_close)
+    alert("{\"action\":\"CONTEXT\",\"symbol\":\""+syminfo.ticker+"\",\"timeframe\":\""+chartTF+"\",\"direction\":\"flat\",\"mode\":\""+mode+"\",\"price\":"+str.tostring(math.round(close*100)/100)+",\"RSI\":"+str.tostring(rsi)+",\"MACD_Line\":"+str.tostring(macdLine)+",\"MACD_Signal\":"+str.tostring(macdSignal)+",\"MACD_Hist\":"+str.tostring(macdHist)+",\"EMA_Fast\":"+str.tostring(emaFast)+",\"EMA_Slow\":"+str.tostring(emaSlow)+",\"ADX\":"+str.tostring(adx)+",\"ATR\":"+str.tostring(atr)+",\"Volume\":"+str.tostring(volume)+",\"Vol_SMA\":"+str.tostring(volSMA)+",\"Vol_vs_Avg\":"+str.tostring(volume/volSMA)+",\"Candle\":{\"Open\":"+str.tostring(open)+",\"High\":"+str.tostring(high)+",\"Low\":"+str.tostring(low)+",\"Close\":"+str.tostring(close)+",\"Prev_Close\":"+str.tostring(close[1])+"},\"Divergence\":{\"RSI\":\""+rsiDiv+"\",\"MACD\":\""+macdDiv+"\"}}", alert.freq_once_per_bar_close)
+
 
 // === ALERT CONDITIONS ===
 alertcondition(longTrigger, title="Entry Alert - All Conditions")
